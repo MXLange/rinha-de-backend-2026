@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <time.h>
+#include <omp.h>
 #include "cjson/cJSON.h"
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -547,7 +548,7 @@ static double euclidean_dist(const double *a, const double *b) {
         double d = a[i] - b[i];
         sum += d * d;
     }
-    return sqrt(sum);
+    return sum;
 }
 
 static void knn_classify(const double *vec, const RefVec *refs, int nrefs,
@@ -765,11 +766,16 @@ int main(int argc, char **argv) {
     rng_init(&rng, payloads_seed);
 
     TestEntry *entries = malloc((size_t)payload_size * sizeof(TestEntry));
+    /* Pass 1 (sequencial): consome RNG — determinismo bit-a-bit. */
     for (int i = 0; i < payload_size; i++) {
         Profile p = pick_profile(&rng, fraud_ratio_payloads);
         entries[i].req = gen_request(&rng, p, &mcc);
         normalize(&entries[i].req, &norm, &mcc, entries[i].vec);
         for (int j = 0; j < VDIM; j++) entries[i].vec[j] = round4(entries[i].vec[j]);
+    }
+    /* Pass 2 (paralelo): KNN é puro — cada i é independente. */
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < payload_size; i++) {
         knn_classify(entries[i].vec, refs, ref_size, &entries[i].approved, &entries[i].fraud_score);
         entries[i].fraud_score = round4(entries[i].fraud_score);
     }
@@ -798,14 +804,8 @@ int main(int argc, char **argv) {
     for (int i = 0; i < payload_size; i++) {
         cJSON *entry = cJSON_CreateObject();
         cJSON_AddItemToObject(entry, "request", request_to_json(&entries[i].req));
-
-        cJSON *info = cJSON_AddObjectToObject(entry, "info");
-        cJSON_AddItemToObject(info, "vector", jnum_array(entries[i].vec, VDIM));
-
-        cJSON *resp = cJSON_AddObjectToObject(info, "expected_response");
-        cJSON_AddBoolToObject(resp, "approved", entries[i].approved);
-        cJSON_AddItemToObject(resp, "fraud_score", jnum(entries[i].fraud_score));
-
+        cJSON_AddBoolToObject(entry, "expected_approved", entries[i].approved);
+        cJSON_AddItemToObject(entry, "expected_fraud_score", jnum(entries[i].fraud_score));
         cJSON_AddItemToArray(arr, entry);
     }
 
